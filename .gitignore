@@ -1,0 +1,25 @@
+# Environment
+.env
+.env.local
+.env.production
+
+# VS Code
+.vscode
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Testing
+.pytest_cache/
