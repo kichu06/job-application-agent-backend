@@ -22,23 +22,21 @@ def root():
 @app.post("/run-agent")
 async def run_agent(
     resume: UploadFile = File(...),
-    jd_text: str = Form(...)
+    jd_text: str = Form(...),
+    language: str = Form("en")
 ):
-    # Validate file is a PDF
     if not resume.filename.endswith(".pdf"):
         raise HTTPException(
             status_code=400,
             detail="Only PDF files are supported"
         )
 
-    # Validate JD text is not empty
     if not jd_text.strip():
         raise HTTPException(
             status_code=400,
             detail="Job description cannot be empty"
         )
 
-    # Step 1 — Extract text from PDF
     try:
         pdf_bytes = await resume.read()
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -60,11 +58,11 @@ async def run_agent(
             detail=f"Failed to read PDF: {str(e)}"
         )
 
-    # Step 2 — Run LangGraph agent
     try:
         result = agent.invoke({
             "jd_text": jd_text,
             "resume_text": resume_text,
+            "language": language,
             "extracted_skills": None,
             "parsed_resume": None,
             "skill_gaps": None,
@@ -74,13 +72,11 @@ async def run_agent(
 
     except Exception as e:
         import traceback
-        traceback.print_exc()  # prints full error in terminal
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail=f"Agent failed: {str(e)}"
         )
-
-    # Step 3 — Return results
     return {
         "extracted_skills": result["extracted_skills"],
         "parsed_resume": result["parsed_resume"],

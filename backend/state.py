@@ -3,7 +3,8 @@ from typing import TypedDict, Optional
 class AgentState(TypedDict):
     # Inputs
     jd_text: str
-    resume_text: str    
+    resume_text: str  
+    language: str 
 
     # Node 1 output
     extracted_skills: Optional[dict]

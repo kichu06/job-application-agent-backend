@@ -5,7 +5,8 @@ from nodes import (
     parse_resume,
     analyze_gaps,
     generate_cover_letter,
-    generate_interview_questions
+    generate_interview_questions,
+    translate_output
 )
 
 def create_agent():
@@ -18,6 +19,7 @@ def create_agent():
     graph.add_node("analyze_gaps", analyze_gaps)
     graph.add_node("generate_cover_letter", generate_cover_letter)
     graph.add_node("generate_interview_questions", generate_interview_questions)
+    graph.add_node("translate_output", translate_output)
 
     # 3. Define the flow — edges between nodes
     graph.set_entry_point("extract_jd_skills")
@@ -25,7 +27,8 @@ def create_agent():
     graph.add_edge("parse_resume", "analyze_gaps")
     graph.add_edge("analyze_gaps", "generate_cover_letter")
     graph.add_edge("generate_cover_letter", "generate_interview_questions")
-    graph.add_edge("generate_interview_questions", END)
+    graph.add_edge("generate_interview_questions", "translate_output")
+    graph.add_edge("translate_output", END)
 
     # 4. Compile and return
     return graph.compile()
