@@ -4,6 +4,7 @@ from nodes import (
     extract_jd_skills,
     parse_resume,
     analyze_gaps,
+    compute_ats_score,
     generate_cover_letter,
     generate_interview_questions,
     translate_output
@@ -17,6 +18,7 @@ def create_agent():
     graph.add_node("extract_jd_skills", extract_jd_skills)
     graph.add_node("parse_resume", parse_resume)
     graph.add_node("analyze_gaps", analyze_gaps)
+    graph.add_node("compute_ats_score", compute_ats_score)
     graph.add_node("generate_cover_letter", generate_cover_letter)
     graph.add_node("generate_interview_questions", generate_interview_questions)
     graph.add_node("translate_output", translate_output)
@@ -25,7 +27,8 @@ def create_agent():
     graph.set_entry_point("extract_jd_skills")
     graph.add_edge("extract_jd_skills", "parse_resume")
     graph.add_edge("parse_resume", "analyze_gaps")
-    graph.add_edge("analyze_gaps", "generate_cover_letter")
+    graph.add_edge("analyze_gaps", "compute_ats_score")
+    graph.add_edge("compute_ats_score", "generate_cover_letter")
     graph.add_edge("generate_cover_letter", "generate_interview_questions")
     graph.add_edge("generate_interview_questions", "translate_output")
     graph.add_edge("translate_output", END)

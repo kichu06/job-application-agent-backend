@@ -11,13 +11,13 @@ load_dotenv()
 groq_llm = ChatGroq(
     model="llama-3.1-8b-instant",
     api_key=os.getenv("GROQ_TOKEN"),
-    temperature=0.3
+    temperature=0.0
 )
 
 gemini_llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash",
     google_api_key=os.getenv("GEMINI_TOKEN"),
-    temperature=0.3
+    temperature=0.0
 )
 
 def invoke_with_fallback(chain_prompt, inputs):
@@ -41,12 +41,45 @@ def clean_json_response(text):
     return text.strip()
 
 
+# ─────────────────────────────────────────
+# OPTION C — Python deduplication (runs after Node 1)
+# ─────────────────────────────────────────
+def normalize_skill(skill: str) -> str:
+    """Normalize skill for deduplication comparison."""
+    # Remove version annotations: "JavaScript (ES6+)" → "javascript"
+    skill = re.sub(r'\s*\(.*?\)', '', skill)
+    # Remove punctuation
+    skill = re.sub(r'[^\w\s]', '', skill)
+    return skill.strip().lower()
+
+
+def deduplicate_skills(skills: list) -> list:
+    """Remove duplicate skills keeping the most specific version."""
+    seen = {}
+    for skill in skills:
+        key = normalize_skill(skill)
+        if not key:
+            continue
+        # Keep the longer (more specific) version
+        if key not in seen or len(skill) > len(seen[key]):
+            seen[key] = skill
+    return list(seen.values())
+
+
+# ─────────────────────────────────────────
+# NODE 1 — Extract skills from job description
+# Option B: structured extraction with categories separated
+# ─────────────────────────────────────────
 def extract_jd_skills(state):
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a job description analyzer. 
          Extract information and return ONLY valid JSON, no extra text."""),
-        ("human", """Analyze this job description and return JSON with this exact structure:
+        ("human", """Analyze this job description carefully and return JSON 
+         with this exact structure:
          {{
+           "categories": {{
+             "CategoryName": ["skill1", "skill2"]
+           }},
            "required_skills": ["individual atomic skill names only"],
            "optional_skills": ["individual atomic skill names only"],
            "seniority": "extract exact seniority level from JD as a string",
@@ -55,27 +88,56 @@ def extract_jd_skills(state):
            "job_title": "extract exact job title from JD"
          }}
 
-         CRITICAL RULES FOR SKILLS EXTRACTION:
+         CRITICAL RULES:
          - This job could be in ANY field — tech, marketing, sales, healthcare, 
            finance, design, education, or any other industry
-         - Each skill must be ONE specific, atomic item — a tool, technology, 
+
+         STEP 1 — Identify categories:
+         - The JD may have section/category headers (e.g. "State Management", 
+           "Build Tools", "Testing", "Frontend", "Version Control")
+         - A category header is a label with multiple sub-items listed under it
+         - Fill "categories" with these headers as keys and their items as values
+         - This forces you to think about structure before extracting skills
+
+         STEP 2 — Extract required_skills:
+         - Extract ONLY the leaf items (actual skills), never the category headers
+         - Each skill must be ONE specific atomic item: a tool, technology,
            certification, methodology, language, or named competency
-         - Break down compound bullet points into individual skills
-         - DO NOT include full requirement sentences as a single skill
-         - DO NOT copy JD bullet points verbatim
-         - Generic soft skills should only be included if explicitly named,
-           keep them short, e.g. "Communication Skills"
-         - Each item should be 1-5 words maximum
+         - If the same skill appears in multiple forms 
+           (e.g. "JavaScript" and "JavaScript (ES6+)"),
+           include ONLY the most specific version ("JavaScript (ES6+)")
+         - DO NOT include category/section headers as skills
+         - DO NOT include full sentences
+         - Generic soft skills only if explicitly named, keep them short
+         - Each item 1-5 words maximum
+
+         STEP 3 — Extract optional_skills:
+         - Same rules as required_skills
+         - These are skills marked as "nice to have", "preferred", "bonus"
 
          Job Description:
          {jd_text}""")
     ])
-    
+
     response = invoke_with_fallback(prompt, {"jd_text": state["jd_text"]})
     extracted = json.loads(clean_json_response(response.content))
+
+    # Option C — Python deduplication after LLM extraction
+    if "required_skills" in extracted:
+        extracted["required_skills"] = deduplicate_skills(
+            extracted["required_skills"]
+        )
+    if "optional_skills" in extracted:
+        extracted["optional_skills"] = deduplicate_skills(
+            extracted["optional_skills"]
+        )
+
     return {"extracted_skills": extracted}
 
 
+# ─────────────────────────────────────────
+# NODE 2 — Parse resume text into structured data
+# ─────────────────────────────────────────
 def parse_resume(state):
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a resume parser.
@@ -92,19 +154,29 @@ def parse_resume(state):
 
          CRITICAL RULES:
          - Extract ONLY skills that are EXPLICITLY written in the resume text below
-         - DO NOT add, infer, or guess any skill that is not literally present
+         - DO NOT add, infer, or guess any skill not literally present in the text
          - DO NOT include section headings as skills
          - Each skill must be a single atomic item
          - Split comma or bullet separated items into individual entries
+         - Double check: every item in your_skills must appear 
+           word-for-word somewhere in the resume text
 
          Resume:
          {resume_text}""")
     ])
     response = invoke_with_fallback(prompt, {"resume_text": state["resume_text"]})
     parsed = json.loads(clean_json_response(response.content))
+
+    # Also deduplicate resume skills
+    if "your_skills" in parsed:
+        parsed["your_skills"] = deduplicate_skills(parsed["your_skills"])
+
     return {"parsed_resume": parsed}
 
 
+# ─────────────────────────────────────────
+# NODE 3 — Gap analysis
+# ─────────────────────────────────────────
 def analyze_gaps(state):
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a career advisor.
@@ -114,8 +186,17 @@ def analyze_gaps(state):
         TASK:
          - matched_skills = skills from REQUIRED list that candidate also has
          - missing_skills = skills from REQUIRED list that candidate does NOT have
-         - A skill can appear in EITHER matched_skills OR missing_skills, NEVER both
-         - Every skill in REQUIRED list must appear in exactly ONE of the two lists
+         - A skill can NEVER appear in both lists
+         - Every skill in REQUIRED list must appear in exactly ONE list
+
+         IMPORTANT — treat these as the SAME skill when matching:
+         - "JavaScript" == "JavaScript (ES6+)" == "JS"
+         - "React" == "React.js" == "ReactJS"  
+         - "Node" == "Node.js" == "NodeJS"
+         - "Postgres" == "PostgreSQL"
+         - "TypeScript" == "TS"
+         - Apply this logic for any technology with version suffixes, 
+           dots, or common abbreviations
 
          Return JSON with this exact structure:
          {{
@@ -132,6 +213,22 @@ def analyze_gaps(state):
     })
     gaps = json.loads(clean_json_response(response.content))
 
+    # Python deduplication on matched/missing too
+    gaps["matched_skills"] = deduplicate_skills(
+        gaps.get("matched_skills", [])
+    )
+    gaps["missing_skills"] = deduplicate_skills(
+        gaps.get("missing_skills", [])
+    )
+
+    # Remove any skill that appears in both lists (belt and suspenders)
+    matched_normalized = {normalize_skill(s) for s in gaps["matched_skills"]}
+    gaps["missing_skills"] = [
+        s for s in gaps["missing_skills"]
+        if normalize_skill(s) not in matched_normalized
+    ]
+
+    # Python-calculated match score
     matched_count = len(gaps.get("matched_skills", []))
     total_count = matched_count + len(gaps.get("missing_skills", []))
     score = round((matched_count / total_count) * 100) if total_count > 0 else 0
@@ -140,6 +237,76 @@ def analyze_gaps(state):
     return {"skill_gaps": gaps}
 
 
+# ─────────────────────────────────────────
+# NODE 4 — Compute ATS score (pure Python, no LLM)
+# ─────────────────────────────────────────
+def compute_ats_score(state):
+    required_skills = state["extracted_skills"]["required_skills"]
+    matched_skills = state["skill_gaps"]["matched_skills"]
+    missing_skills = state["skill_gaps"]["missing_skills"]
+    candidate_skills = state["parsed_resume"]["your_skills"]
+    optional_skills = state["extracted_skills"].get("optional_skills", [])
+
+    total_required = len(required_skills)
+    matched_count = len(matched_skills)
+    match_percentage = round(
+        (matched_count / total_required) * 100
+    ) if total_required else 100
+
+    optional_matches = [
+        skill for skill in optional_skills
+        if normalize_skill(skill) in {normalize_skill(s) for s in candidate_skills}
+    ]
+    optional_bonus = min(10, len(optional_matches) * 2)
+
+    required_normalized = {normalize_skill(s) for s in required_skills}
+    optional_normalized = {normalize_skill(s) for s in optional_skills}
+    extra_skills = [
+        skill for skill in candidate_skills
+        if normalize_skill(skill) not in required_normalized
+        and normalize_skill(skill) not in optional_normalized
+    ]
+    extra_bonus = min(5, len(extra_skills) // 3)
+
+    score = min(100, match_percentage + optional_bonus + extra_bonus)
+
+    recommendations = []
+    if missing_skills:
+        recommendations.append(
+            "Focus on the missing required skills: " + ", ".join(missing_skills)
+        )
+    if optional_skills:
+        recommendations.append(
+            "Strengthen the resume by highlighting optional skills such as: "
+            + ", ".join(optional_skills)
+        )
+    elif extra_skills:
+        recommendations.append(
+            "Your resume includes additional skills beyond the JD requirements "
+            "that can help ATS relevance: " + ", ".join(extra_skills[:5])
+        )
+    if not candidate_skills:
+        recommendations.append(
+            "Add more explicit skills to the resume to improve ATS matching."
+        )
+
+    return {
+        "ats_score": {
+            "score": score,
+            "match_percentage": match_percentage,
+            "matched_required_count": matched_count,
+            "required_count": total_required,
+            "optional_matches": optional_matches,
+            "extra_skill_count": len(extra_skills),
+            "missing_skills": missing_skills,
+            "recommendations": recommendations
+        }
+    }
+
+
+# ─────────────────────────────────────────
+# NODE 5 — Generate cover letter
+# ─────────────────────────────────────────
 def generate_cover_letter(state):
     prompt = ChatPromptTemplate.from_messages([
         ("system", "You are an expert cover letter writer."),
@@ -176,6 +343,9 @@ def generate_cover_letter(state):
     return {"cover_letter": response.content}
 
 
+# ─────────────────────────────────────────
+# NODE 6 — Generate interview questions
+# ─────────────────────────────────────────
 def generate_interview_questions(state):
     prompt = ChatPromptTemplate.from_messages([
         ("system", "You are an interview coach."),
@@ -203,6 +373,9 @@ def generate_interview_questions(state):
     return {"interview_questions": questions["questions"]}
 
 
+# ─────────────────────────────────────────
+# NODE 7 — Translate output to German if requested
+# ─────────────────────────────────────────
 def translate_output(state):
     language = state.get("language", "en")
 
@@ -211,15 +384,18 @@ def translate_output(state):
 
     try:
         cover_prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a professional translator specializing in job application documents. Translate into formal German (Sie-form). Return only the translated text, no explanation."),
+            ("system", """You are a professional translator specializing in 
+             job application documents. Translate into formal German (Sie-form). 
+             Return only the translated text, no explanation."""),
             ("human", """Translate the following cover letter into German.
 
-Keep technology names unchanged (React.js, Python, Docker, FastAPI, Git, etc.).
-Keep company names and proper nouns unchanged.
-Preserve paragraph structure.
+             Keep technology names unchanged (React.js, Python, Docker, 
+             FastAPI, Git, etc.).
+             Keep company names and proper nouns unchanged.
+             Preserve paragraph structure.
 
-Cover letter:
-{cover_letter}""")
+             Cover letter:
+             {cover_letter}""")
         ])
 
         cover_response = invoke_with_fallback(cover_prompt, {
@@ -233,14 +409,18 @@ Cover letter:
         )
 
         questions_prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a professional translator specializing in job application documents. Translate into formal German (Sie-form). Return only the translated text, no explanation."),
-            ("human", """Translate the following interview questions and suggested answers into German.
+            ("system", """You are a professional translator specializing in 
+             job application documents. Translate into formal German (Sie-form). 
+             Return only the translated text, no explanation."""),
+            ("human", """Translate the following interview questions and 
+             suggested answers into German.
 
-Keep technology names unchanged (React.js, Python, Docker, FastAPI, Git, etc.).
-Keep company names and proper nouns unchanged.
-Preserve the question-answer structure.
+             Keep technology names unchanged (React.js, Python, Docker, 
+             FastAPI, Git, etc.).
+             Keep company names and proper nouns unchanged.
+             Preserve the question-answer structure.
 
-{questions}""")
+             {questions}""")
         ])
 
         questions_response = invoke_with_fallback(questions_prompt, {
@@ -255,14 +435,15 @@ Preserve the question-answer structure.
             question = ""
             answer = ""
             for line in block.splitlines():
-                if line.startswith("QUESTION:"):
-                    question = line[len("QUESTION:"):].strip()
-                elif line.startswith("ANSWER:"):
-                    answer = line[len("ANSWER:"):].strip()
+                stripped = line.strip()
+                if stripped.startswith("QUESTION:") or stripped.startswith("FRAGE:"):
+                    question = stripped.split(":", 1)[1].strip()
+                elif stripped.startswith("ANSWER:") or stripped.startswith("ANTWORT:"):
+                    answer = stripped.split(":", 1)[1].strip()
                 elif answer:
-                    answer += " " + line.strip()
+                    answer += " " + stripped
                 else:
-                    question += " " + line.strip()
+                    question += " " + stripped
 
             if question or answer:
                 translated_questions.append({

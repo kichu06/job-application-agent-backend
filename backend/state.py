@@ -20,3 +20,8 @@ class AgentState(TypedDict):
 
     # Node 5 output
     interview_questions: Optional[list]
+
+    # Node 6 output
+    ats_score: Optional[dict]
+
+

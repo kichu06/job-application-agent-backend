@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import pdfplumber
 import io
 
@@ -81,6 +82,52 @@ async def run_agent(
         "extracted_skills": result["extracted_skills"],
         "parsed_resume": result["parsed_resume"],
         "skill_gaps": result["skill_gaps"],
+        "ats_score": result.get("ats_score"),
         "cover_letter": result["cover_letter"],
         "interview_questions": result["interview_questions"]
     }
+
+class RefineCoverLetterRequest(BaseModel):
+    cover_letter: str
+    instruction: str
+    context: dict
+
+@app.post("/refine-cover-letter")
+async def refine_cover_letter(request: RefineCoverLetterRequest):
+    try:
+        from langchain_core.prompts import ChatPromptTemplate
+        from nodes import invoke_with_fallback
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are an expert cover letter writer. Refine the cover letter based on the instruction. Return only the updated cover letter text, no explanation, no preamble."),
+            ("human", """Refine this cover letter based on the instruction below.
+
+Candidate: {candidate_name}
+Job Title: {job_title}
+Company: {company_name}
+
+Instruction: {instruction}
+
+Current cover letter:
+{cover_letter}
+
+Return ONLY the updated cover letter text. Keep the same general structure unless the instruction says otherwise. Do not add placeholders.""")
+        ])
+
+        response = invoke_with_fallback(prompt, {
+            "candidate_name": request.context.get("candidate_name", ""),
+            "job_title": request.context.get("job_title", ""),
+            "company_name": request.context.get("company_name", ""),
+            "instruction": request.instruction,
+            "cover_letter": request.cover_letter
+        })
+
+        return {"cover_letter": response.content.strip()}
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Refinement failed: {str(e)}"
+        )
+
+    
